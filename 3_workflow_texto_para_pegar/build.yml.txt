@@ -1,0 +1,107 @@
+name: Compilar Live2Pro (Windows)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Descargar ffmpeg, yt-dlp, deno, VLC y cámara virtual
+        shell: pwsh
+        run: |
+          $ProgressPreference = 'SilentlyContinue'
+          New-Item -ItemType Directory -Force bin, vlc, tmp, driver | Out-Null
+
+          function Get-File($url, $out) {
+            Write-Host ">> Descargando $url"
+            curl.exe -L --fail --retry 3 -sS -o $out $url
+            if ($LASTEXITCODE -ne 0) { throw "FALLO LA DESCARGA: $url" }
+            Write-Host ("   OK {0:N1} MB" -f ((Get-Item $out).Length / 1MB))
+          }
+          function Unzip($zip, $dest) {
+            Write-Host ">> Extrayendo $zip"
+            7z x $zip "-o$dest" -y | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "FALLO LA EXTRACCION: $zip" }
+          }
+
+          Get-File "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" "bin\yt-dlp.exe"
+
+          Get-File "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" "tmp\ffmpeg.zip"
+          Unzip "tmp\ffmpeg.zip" "tmp\ffmpeg"
+          $ff = Get-ChildItem tmp\ffmpeg -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $ff) { throw "No se encontro ffmpeg.exe dentro del zip" }
+          Copy-Item $ff.FullName bin\ffmpeg.exe
+
+          Get-File "https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip" "tmp\deno.zip"
+          Unzip "tmp\deno.zip" "bin"
+
+          Get-File "https://get.videolan.org/vlc/3.0.21/win64/vlc-3.0.21-win64.zip" "tmp\vlc.zip"
+          Unzip "tmp\vlc.zip" "tmp\vlc"
+          $v = (Get-ChildItem tmp\vlc -Directory | Select-Object -First 1).FullName
+          Copy-Item "$v\libvlc.dll","$v\libvlccore.dll" vlc\
+          Copy-Item "$v\plugins" vlc\plugins -Recurse
+
+          # Camara virtual: Unity Capture (filtro DirectShow)
+          try {
+          Get-File "https://github.com/schellingb/UnityCapture/archive/refs/heads/master.zip" "tmp\uc.zip"
+          Unzip "tmp\uc.zip" "tmp\uc"
+          $uc = Get-ChildItem tmp\uc -Recurse -Filter UnityCaptureFilter64.dll | Select-Object -First 1
+          if ($uc) { Copy-Item "$($uc.DirectoryName)\*" driver\ -Recurse } else { Write-Warning "Unity Capture no encontrado: se omite la camara virtual" }
+          } catch { Write-Warning "Camara virtual omitida: $_" }
+
+          Get-ChildItem bin, vlc, driver | Format-Table Name, Length
+          exit 0
+
+      - name: Instalar dependencias de Python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compilar con PyInstaller
+        run: >
+          pyinstaller --noconfirm --windowed --name Live2Pro --paths live2pro
+          --collect-all NDIlib --collect-all pyvirtualcam --collect-all sounddevice --collect-all _sounddevice_data
+          --hidden-import vlc
+          --exclude-module PySide6.QtWebEngineCore
+          --exclude-module PySide6.QtWebEngineWidgets
+          --exclude-module PySide6.QtQuick
+          --exclude-module PySide6.QtQml
+          --exclude-module PySide6.Qt3DCore
+          --exclude-module PySide6.QtPdf
+          --exclude-module PySide6.QtCharts
+          --exclude-module PySide6.QtMultimedia
+          live2pro\app.py
+
+      - name: Copiar bin, vlc y driver a la carpeta final
+        shell: pwsh
+        run: |
+          Copy-Item bin dist\Live2Pro\bin -Recurse
+          Copy-Item vlc dist\Live2Pro\vlc -Recurse
+          Copy-Item driver dist\Live2Pro\driver -Recurse
+
+      - name: Crear instalador (Inno Setup)
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer.iss
+          exit 0
+
+      - name: Zip portátil
+        shell: pwsh
+        run: Compress-Archive dist\Live2Pro Live2Pro-portable.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Live2Pro-windows
+          path: |
+            Live2Pro-portable.zip
+            Output\Live2Pro-Setup.exe
